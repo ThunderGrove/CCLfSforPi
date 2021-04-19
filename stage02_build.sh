@@ -18,8 +18,9 @@ export SOURCES_DIR=$WORKSPACE_DIR/src
 export OUTPUT_DIR=$WORKSPACE_DIR/out
 export BUILD_DIR=$WORKSPACE_DIR/build
 export TOOLS_DIR=$OUTPUT_DIR/tools
-export SYSROOT_DIR=$PWD/sysroot
+export SYSROOT_DIR=$WORKSPACE_DIR/sysroot
 export ROOTFS_DIR=$WORKSPACE_DIR/sysroot
+export IMAGES_DIR=$WORKSPACE_DIR/image
 
 export CFLAGS="-Os"
 export CPPFLAGS="-Os"
@@ -32,7 +33,7 @@ export PKG_CONFIG_ALLOW_SYSTEM_LIBS=1
 CONFIG_STRIP_AND_DELETE_DOCS=1
 
 #End of optional parameters
-totalsteps=68
+totalsteps=70
 count=0
 
 function step(){
@@ -48,6 +49,30 @@ function extract(){
         *.tar.xz) tar -Jxf $1 -C $2 ;;
     esac
 }
+
+step "$totalsteps] Create and mount SD card image"
+#Creates a empty 6000 MB unpartitioned disk image
+#dd if=/dev/zero of=$IMAGES_DIR/image.img bs=1M count=6000
+#Setups partion table
+#sudo parted $IMAGES_DIR/image.img mktable msdos
+#Prepares a FAT32 partion from the first MB on image with the size of 640 MB.
+#512 MB should be enough for boot but for safety atleast 25% extra is recommend.
+#The first partition has to be FAT32 as the Raspberry Pi boots the first partition and the part of the firmware that can fit on the SoC only supports FAT32.
+#sudo parted $IMAGES_DIR/image.img mkpart p fat32 1 640
+#Prepares a EXT4 partion from the 641 MB on image and the fill up the remaining image.
+#sudo parted $IMAGES_DIR/image.img mkpart p ext4 641 100%
+#Mounts all partition on image in /dev/mapper
+#sudo kpartx -a $IMAGES_DIR/image.img
+#Formats first partition with FAT32
+#sudo mkfs.vfat /dev/mapper/loop0p1
+#Formats second partition with EXT4
+#sudo mkfs.ext4 /dev/mapper/loop0p2
+#Mounts the EXT4 partition inside $ROOTFS_DIR
+#mount /dev/mapper/loop0p2 $ROOTFS_DIR
+#Makes dir for mounting the FAT32 partition as boot inside the EXT4
+#mkdir $ROOTFS_DIR/boot
+#Mounts the FAT32 partition inside $ROOTFS_DIR/boot
+#mount /dev/mapper/loop0p1 $ROOTFS_DIR/boot
 
 step "$totalsteps] Create root file system directory."
 rm -rf $ROOTFS_DIR
@@ -129,17 +154,22 @@ ln -svf /tmp/resolv.conf $ROOTFS_DIR/etc/resolv.conf
 step "$totalsteps] Raspberry Pi Linux Kernel"
 extract $SOURCES_DIR/linux-raspberrypi-kernel_1.20210201-1.tar.gz $BUILD_DIR
 KERNEL=kernel8 make bcm2711_defconfig ARCH=arm64 CROSS_COMPILE=$CONFIG_TARGET- -C $BUILD_DIR/linux-raspberrypi-kernel_1.20210201-1
-make oldconfig ARCH=arm64 CROSS_COMPILE=$CONFIG_TARGET- -C $BUILD_DIR/linux-raspberrypi-kernel_1.20210201-1
-make prepare ARCH=arm64 CROSS_COMPILE=$CONFIG_TARGET- -C $BUILD_DIR/linux-raspberrypi-kernel_1.20210201-1
-make -j$PARALLEL_JOBS ARCH=arm64 CROSS_COMPILE=$CONFIG_TARGET- Image modules dtbs -C $BUILD_DIR/linux-raspberrypi-kernel_1.20210201-1
-make -j$PARALLEL_JOBS ARCH=$CONFIG_LINUX_ARCH INSTALL_MOD_PATH=$SYSROOT_DIR modules_install -C $BUILD_DIR/linux-raspberrypi-kernel_1.20210201-1
+#make oldconfig ARCH=arm64 CROSS_COMPILE=$CONFIG_TARGET- -C $BUILD_DIR/linux-raspberrypi-kernel_1.20210201-1
+#make prepare ARCH=arm64 CROSS_COMPILE=$CONFIG_TARGET- -C $BUILD_DIR/linux-raspberrypi-kernel_1.20210201-1
+#make -j$PARALLEL_JOBS ARCH=arm64 CROSS_COMPILE=$CONFIG_TARGET- Image modules dtbs -C $BUILD_DIR/linux-raspberrypi-kernel_1.20210201-1
+#make -j$PARALLEL_JOBS ARCH=$CONFIG_LINUX_ARCH INSTALL_MOD_PATH=$SYSROOT_DIR modules_install -C $BUILD_DIR/linux-raspberrypi-kernel_1.20210201-1
+#Copy the compiled kernel and other ellements needed for boot from arch/arm64/boot to the boot dir on the SD card image
+#cp $BUILD_DIR/linux-raspberrypi-kernel_1.20210201-1/arch/arm64/boot/Image $SYSROOT_DIR/boot/kernel8.img
+#cp $BUILD_DIR/linux-raspberrypi-kernel_1.20210201-1/arch/arm64/boot/dts/broadcom/*.dtb $SYSROOT_DIR/boot/
+#mkdir $SYSROOT_DIR/boot/overlays
+#cp $BUILD_DIR/linux-raspberrypi-kernel_1.20210201-1/arch/arm64/boot/dts/overlays/*.dtb* $SYSROOT_DIR/boot/overlays/
+#cp $BUILD_DIR/linux-raspberrypi-kernel_1.20210201-1/arch/arm64/boot/dts/overlays/README $SYSROOT_DIR/boot/overlays/
 
 step "$totalsteps] Raspberry Pi Linux Kernel API Headers"
 #Required to be completed before the glibc step
-make -j$PARALLEL_JOBS ARCH=arm64 CROSS_COMPILE=$CONFIG_TARGET- mrproper headers_check -C $BUILD_DIR/linux-raspberrypi-kernel_1.20210201-1
+make -j$PARALLEL_JOBS ARCH=arm64 CROSS_COMPILE=$CONFIG_TARGET- headers_check -C $BUILD_DIR/linux-raspberrypi-kernel_1.20210201-1
 make -j$PARALLEL_JOBS ARCH=$CONFIG_LINUX_ARCH INSTALL_HDR_PATH=$SYSROOT_DIR/usr headers_install -C $BUILD_DIR/linux-raspberrypi-kernel_1.20210201-1
-
-#rm -rf $BUILD_DIR/linux-raspberrypi-kernel_1.20210201-1
+rm -rf $BUILD_DIR/linux-raspberrypi-kernel_1.20210201-1
 
 step "$totalsteps] man pages"
 extract $SOURCES_DIR/man-pages-5.10.tar.xz $BUILD_DIR
@@ -159,10 +189,11 @@ mkdir $BUILD_DIR/glibc-2.33/glibc-build
     --host=$CONFIG_TARGET \
     --build=$CONFIG_HOST \
     --prefix=/usr \
-    --enable-shared \
-    --without-cvs \
+	--disable-werror \
     --disable-profile \
+    --without-cvs \
     --without-gd \
+    --enable-shared \
     --enable-obsolete-rpc \
     --enable-kernel=5.10 \
     --with-headers=$SYSROOT_DIR/usr/include )
@@ -201,9 +232,10 @@ make -j1 DESTDIR=$SYSROOT_DIR install -C $BUILD_DIR/help2man-1.48.1
 rm -rf $BUILD_DIR/help2man-1.48.1
 
 step "$totalsteps] m4"
+#The latest stable version of m4 are not updated to be compile able with the latest versions of GNUlib so latest version on https://git.savannah.gnu.org/cgit/m4.git/snapshot/m4-branch-1.4.tar.gz are needed and contains aproved comits for next update
 extract $SOURCES_DIR/m4-branch-1.4.tar.gz $BUILD_DIR
-#The bootstrap script bootstrap needs to be executed before ./configure else ./configure will fail
-#The bootstrap script tries to download translation files but the files have disappeared from translationproject.org so the code between this comment and the next will download the files from the waybackmachine and disable the use of the original download function
+#The bootstrap script ./bootstrap needs to be executed before ./configure else ./configure will fail
+#The bootstrap script will try to download translation files but the files have disappeared from translationproject.org so the code between this comment and the next will download the files from the waybackmachine and disable the use of the original download function
 ( cd $BUILD_DIR/m4-branch-1.4/po && \
 	mkdir .reference && \
 	cd .reference && \
@@ -249,12 +281,13 @@ replace3='ls "$_G_ref_po_dir"\/\*.po 2>\/dev\/null'
 if [[ $search3 != "" && $replace3 != "" ]]; then
 	sed -i "s/$search3/$replace3/" $filename3
 fi
-#CFLAGS have to be set to -O2 when cross compiling m4 to prevent configure to get terminated with errors
+#CFLAGS have to be set to -O2 when cross compiling m4 to prevent configure to get terminated with errors. Will fail with -Os or -O3
 ( cd $BUILD_DIR/m4-branch-1.4 && \
 	./bootstrap && \
 	automake && \
     CFLAGS="-O2" CPPFLAGS="" CXXFLAGS="-Os" LDFLAGS="" \
     $BUILD_DIR/m4-branch-1.4/configure \
+	--prefix=/usr \
     --target=$CONFIG_TARGET \
     --host=$CONFIG_TARGET \
     --build=$CONFIG_HOST )
@@ -272,17 +305,19 @@ rm -rf $BUILD_DIR/m4-branch-1.4
 
 step "$totalsteps] gmp"
 #Required to be completed before the mpfr step and the mpc step
-extract $SOURCES_DIR/gmp-6.1.2.tar.xz $BUILD_DIR
-( cd $BUILD_DIR/gmp-6.1.2 && \
+extract $SOURCES_DIR/gmp-6.2.1.tar.xz $BUILD_DIR
+( cd $BUILD_DIR/gmp-6.2.1 && \
     CFLAGS="-Os" CPPFLAGS="" CXXFLAGS="-Os" LDFLAGS="" \
     ac_cv_path_BASH_SHELL=/bin/sh \
-    $BUILD_DIR/gmp-6.1.2/configure \
+    $BUILD_DIR/gmp-6.2.1/configure \
+	--prefix=/usr \
     --target=$CONFIG_TARGET \
     --host=aarch64-linux-gnu \
     --build=$CONFIG_HOST )
-make -j$PARALLEL_JOBS -C $BUILD_DIR/gmp-6.1.2
-make -j$PARALLEL_JOBS DESTDIR=$SYSROOT_DIR install -C $BUILD_DIR/gmp-6.1.2
-#The uncompresed sources does not get removed here since they are need when compilling GCC later
+make -j$PARALLEL_JOBS -C $BUILD_DIR/gmp-6.2.1
+make -j$PARALLEL_JOBS DESTDIR=$SYSROOT_DIR install -C $BUILD_DIR/gmp-6.2.1
+#rm -rf $BUILD_DIR/gmp-6.2.1
+#The uncompresed sources does not get removed here since the are need when compilling GCC later.
 
 step "$totalsteps] mpfr"
 extract $SOURCES_DIR/mpfr-4.1.0.tar.xz $BUILD_DIR
@@ -291,19 +326,26 @@ extract $SOURCES_DIR/mpfr-4.1.0.tar.xz $BUILD_DIR
     CFLAGS="-Os" CPPFLAGS="" CXXFLAGS="-Os" LDFLAGS="" \
 	CPP=/usr/bin/cpp \
     $BUILD_DIR/mpfr-4.1.0/configure \
+	--prefix=/usr \
     --target=$CONFIG_TARGET \
     --host=$CONFIG_TARGET \
     --build=$CONFIG_HOST \
-	--with-gmp=/usr )
+	--docdir=/usr/share/doc/mpfr-4.1.0 \
+	--with-gmp=/usr \
+	--enable-thread-safe )
 make -j$PARALLEL_JOBS -C $BUILD_DIR/mpfr-4.1.0
+make -j$PARALLEL_JOBS html -C $BUILD_DIR/mpfr-4.1.0
 make -j$PARALLEL_JOBS DESTDIR=$SYSROOT_DIR install -C $BUILD_DIR/mpfr-4.1.0
-#The uncompresed sources does not get here since the are need when compilling GCC later
+make -j$PARALLEL_JOBS DESTDIR=$SYSROOT_DIR install-html -C $BUILD_DIR/mpfr-4.1.0
+#rm -rf $BUILD_DIR/mpfr-4.1.0
+#The uncompresed sources does not get removed here since the are need when compilling GCC later.
 
 step "$totalsteps] e2fsprogs"
 extract $SOURCES_DIR/e2fsprogs-1.46.1.tar.gz $BUILD_DIR
 ( cd $BUILD_DIR/e2fsprogs-1.46.1/ && \
     CFLAGS="-Os" CPPFLAGS="" CXXFLAGS="-Os" LDFLAGS="" \
     $BUILD_DIR/e2fsprogs-1.46.1/configure \
+	--prefix=/usr \
     --target=$CONFIG_TARGET \
     --host=$CONFIG_TARGET \
     --build=$CONFIG_HOST )
@@ -317,6 +359,7 @@ extract $SOURCES_DIR/kmod-28.tar.gz $BUILD_DIR
 	./autogen.sh && \
     CFLAGS="-Os" CPPFLAGS="" CXXFLAGS="-Os" LDFLAGS="" \
     $BUILD_DIR/kmod-28/configure \
+	--prefix=/usr \
     --target=$CONFIG_TARGET \
     --host=$CONFIG_TARGET \
     --build=$CONFIG_HOST )
@@ -331,19 +374,22 @@ extract $SOURCES_DIR/mpc-1.2.1.tar.gz $BUILD_DIR
     CFLAGS="-Os" CPPFLAGS="" CXXFLAGS="-Os" LDFLAGS="" \
 	CPP=/usr/bin/cpp \
     $BUILD_DIR/mpc-1.2.1/configure \
+	--prefix=/usr \
     --target=$CONFIG_TARGET \
     --host=$CONFIG_TARGET \
     --build=$CONFIG_HOST )
 make -j$PARALLEL_JOBS -C $BUILD_DIR/mpc-1.2.1
 make -j$PARALLEL_JOBS DESTDIR=$SYSROOT_DIR install -C $BUILD_DIR/mpc-1.2.1
-#The uncompresed sources does not get here since the are need when compilling GCC later
+#rm -rf $BUILD_DIR/mpc-1.2.1
+#The uncompresed sources does not get removed here since the are need when compilling GCC later.
 
 step "$totalsteps] zlib"
 extract $SOURCES_DIR/zlib-1.2.11.tar.xz $BUILD_DIR
 ( cd $BUILD_DIR/zlib-1.2.11/ && \
     CFLAGS="-Os" CPPFLAGS="" CXXFLAGS="-Os" LDFLAGS="" \
 	CC="$CONFIG_TARGET-gcc" \
-    $BUILD_DIR/zlib-1.2.11/configure )
+    $BUILD_DIR/zlib-1.2.11/configure \
+	--prefix=/usr )
 make -j$PARALLEL_JOBS -C $BUILD_DIR/zlib-1.2.11
 make -j$PARALLEL_JOBS DESTDIR=$SYSROOT_DIR install -C $BUILD_DIR/zlib-1.2.11
 rm -rf $BUILD_DIR/zlib-1.2.11
@@ -354,6 +400,7 @@ extract $SOURCES_DIR/flex-2.6.4.tar.gz $BUILD_DIR
 	./autogen.sh && \
     CFLAGS="-Os" CPPFLAGS="" CXXFLAGS="-Os" LDFLAGS="" \
     $BUILD_DIR/flex-2.6.4/configure \
+	--prefix=/usr \
     --target=$CONFIG_TARGET \
     --host=$CONFIG_TARGET \
     --build=$CONFIG_HOST )
@@ -378,6 +425,7 @@ extract $SOURCES_DIR/binutils-2.36.tar.xz $BUILD_DIR
 ( cd $BUILD_DIR/binutils-2.36/ && \
     CFLAGS="-Os" CPPFLAGS="" CXXFLAGS="-Os" LDFLAGS="" \
     $BUILD_DIR/binutils-2.36/configure \
+	--prefix=/usr \
     --target=$CONFIG_TARGET \
     --host=$CONFIG_TARGET \
     --build=$CONFIG_HOST )
@@ -385,34 +433,56 @@ make -j$PARALLEL_JOBS -C $BUILD_DIR/binutils-2.36
 make -j$PARALLEL_JOBS DESTDIR=$SYSROOT_DIR install -C $BUILD_DIR/binutils-2.36
 rm -rf $BUILD_DIR/binutils-2.36
 
-#step "$totalsteps] gcc"
-#extract $SOURCES_DIR/gcc-10.2.0.tar.xz $BUILD_DIR
+step "$totalsteps] gcc"
+extract $SOURCES_DIR/gcc-releases-gcc-10.3.0.tar.gz $BUILD_DIR
 #cp -ar $SOURCES_DIR/gcc-releases-gcc-10 $BUILD_DIR
-#mv -v $BUILD_DIR/gcc-releases-gcc-10 $BUILD_DIR/gcc-10.2.0
-#extract $SOURCES_DIR/isl-0.23.tar.xz $BUILD_DIR
-#mv -v $BUILD_DIR/gmp-6.1.2 $BUILD_DIR/gcc-10.2.0/gmp
-#mv -v $BUILD_DIR/mpfr-4.1.0 $BUILD_DIR/gcc-10.2.0/mpfc
-#mv -v $BUILD_DIR/mpc-1.2.1 $BUILD_DIR/gcc-10.2.0/mpc
-#mv -v $BUILD_DIR/isl-0.23 $BUILD_DIR/gcc-10.2.0/isl
-#( cd $BUILD_DIR/gcc-10.2.0/ && \
-#    CFLAGS="-O2" CPPFLAGS="" CXXFLAGS="-O2" LDFLAGS="" \
-#    $BUILD_DIR/gcc-10.2.0/configure \
-#    --target=$CONFIG_TARGET \
-#    --host=aarch64-linux-gnu \
-#    --build=$CONFIG_HOST \
-#	--disable-libgomp \
-#	--with-sysroot=$SYSROOT_DIR \
-#	--disable-libgomp )
-#ADDs --no-discard-stderr to a line in m4-branch-1.4/doc/Makefile.am so make commands does complete
-#filename5="$BUILD_DIR/gcc-10.2.0/configure"
+mv -v $BUILD_DIR/gcc-releases-gcc-10.3.0 $BUILD_DIR/gcc-10.3.0
+#extract $SOURCES_DIR/gmp-6.2.1.tar.xz $BUILD_DIR
+#extract $SOURCES_DIR/mpfr-4.1.0.tar.xz $BUILD_DIR
+#extract $SOURCES_DIR/mpc-1.2.1.tar.gz $BUILD_DIR
+extract $SOURCES_DIR/isl-0.23.tar.xz $BUILD_DIR
+#mv -v $BUILD_DIR/gmp-6.2.1 $BUILD_DIR/gcc-10.3.0/gmp
+#mv -v $BUILD_DIR/mpfr-4.1.0 $BUILD_DIR/gcc-10.3.0/mpfc
+#mv -v $BUILD_DIR/mpc-1.2.1 $BUILD_DIR/gcc-10.3.0/mpc
+mv -v $BUILD_DIR/isl-0.23 $BUILD_DIR/gcc-10.3.0/isl
+#	cd mpfc && make distclean && cd .. && \
+#	cd gmp && make distclean && cd .. && \
+#	cd mpc && make distclean && cd .. && \
+( cd $BUILD_DIR/gcc-10.3.0/ && \
+	mkdir build && cd build && \
+    CFLAGS="-O2" CPPFLAGS="" CXXFLAGS="-O2" LDFLAGS="" \
+    ../configure \
+	--prefix=/usr \
+    --target=$CONFIG_TARGET \
+    --host=aarch64-linux-gnu \
+    --build=$CONFIG_HOST \
+	--with-sysroot=$SYSROOT_DIR \
+	--with-system-zlib \
+	--with-cpu=cortex-a72 \
+	--with-newlib \
+	--without-headers \
+	--with-gmp=$BUILD_DIR/gmp-6.2.1 \
+	--with-mpfr=$BUILD_DIR/mpfr-4.1.0/src \
+	--with-mpc=$BUILD_DIR/mpc-1.2.1/src \
+	--with-gmp-include=$BUILD_DIR/gmp-6.2.1 \
+	--with-mpfr-include=$BUILD_DIR/mpfr-4.1.0/src \
+	--with-mpc-include=$BUILD_DIR/mpc-1.2.1/src \
+	--enable-initfini-array \
+	--disable-multilib \
+	--disable-bootstrap )
+#	--enable-languages=c,c++,fortran \
+ #LD=ld \
+ #--disable-libgomp \
+#Removes -V -qversion from every line with "for ac_option in --version -v" so make does not fail.
+#filename5="$BUILD_DIR/gcc-10.3.0/configure"
 #search5="for ac_option in --version -v -V -qversion; do"
 #replace5="for ac_option in --version -v; do"
 #if [[ $search5 != "" && $replace5 != "" ]]; then
 #	sed -i "s/$search5/$replace5/" $filename5
 #fi
-#make -j$PARALLEL_JOBS -C $BUILD_DIR/gcc-10.2.0
-#make -j$PARALLEL_JOBS DESTDIR=$SYSROOT_DIR install -C $BUILD_DIR/gcc-10.2.0
-#rm -rf $BUILD_DIR/gcc-10.2.0
+make -j1 -C $BUILD_DIR/gcc-10.3.0/build
+make -j$PARALLEL_JOBS DESTDIR=$SYSROOT_DIR install -C $BUILD_DIR/gcc-10.3.0/build
+rm -rf $BUILD_DIR/gcc-10.3.0
 
 step "$totalsteps] gdbm"
 extract $SOURCES_DIR/gdbm-1.19.tar.gz $BUILD_DIR
@@ -494,6 +564,7 @@ extract $SOURCES_DIR/shadow-4.8.1.tar.xz $BUILD_DIR
 ( cd $BUILD_DIR/shadow-4.8.1/ && \
     CFLAGS="-Os" CPPFLAGS="" CXXFLAGS="-Os" LDFLAGS="" \
     $BUILD_DIR/shadow-4.8.1/configure \
+	--prefix=/usr \
     --target=$CONFIG_TARGET \
     --host=$CONFIG_TARGET \
     --build=$CONFIG_HOST )
@@ -508,6 +579,7 @@ extract $SOURCES_DIR/procps-v3.3.16.tar.gz $BUILD_DIR
 	./autogen.sh && \
     CFLAGS="-Os" CPPFLAGS="" CXXFLAGS="-Os" LDFLAGS="" \
     $BUILD_DIR/procps-v3.3.16/configure \
+	--prefix=/usr \
     --target=$CONFIG_TARGET \
     --host=$CONFIG_TARGET \
     --build=$CONFIG_HOST \
@@ -528,6 +600,7 @@ extract $SOURCES_DIR/libtool-2.4.6.tar.xz $BUILD_DIR
 ( cd $BUILD_DIR/libtool-2.4.6/ && \
     CFLAGS="-Os" CPPFLAGS="" CXXFLAGS="-Os" LDFLAGS="" \
     $BUILD_DIR/libtool-2.4.6/configure \
+	--prefix=/usr \
     --target=$CONFIG_TARGET \
     --host=$CONFIG_TARGET \
     --build=$CONFIG_HOST )
@@ -543,7 +616,7 @@ rm -rf $BUILD_DIR/iana-etc-20210202
 
 step "$totalsteps] coreutils"
 extract $SOURCES_DIR/coreutils-8.32.tar.xz $BUILD_DIR
-#When compiling for 64-bit ARM the command SYS_getdents are called SYS_getdents64. This is not cross compiler specefic as compiling native on 64-bit ARM will fail with same error.
+#When compiling for 64-bit ARM the command SYS_getdents are called SYS_getdents64. This is not cross compiler specefic as compiling native on 64-bit ARM will fail with same error. The below find-and-replace will fix this.
 filename6="$BUILD_DIR/coreutils-8.32/src/ls.c"
 search6="SYS_getdents,"
 replace6="SYS_getdents64,"
@@ -553,6 +626,7 @@ fi
 ( cd $BUILD_DIR/coreutils-8.32/ && \
     CFLAGS="-Os" CPPFLAGS="" CXXFLAGS="-Os" LDFLAGS="" \
     $BUILD_DIR/coreutils-8.32/configure \
+	--prefix=/usr \
     --target=$CONFIG_TARGET \
     --host=$CONFIG_TARGET \
     --build=$CONFIG_HOST )
@@ -565,6 +639,7 @@ extract $SOURCES_DIR/iproute2-5.9.0.tar.xz $BUILD_DIR
 ( cd $BUILD_DIR/iproute2-5.9.0/ && \
     CFLAGS="-Os" CPPFLAGS="" CXXFLAGS="-Os" LDFLAGS="" \
     $BUILD_DIR/iproute2-5.9.0/configure \
+	--prefix=/usr \
     --target=$CONFIG_TARGET \
     --host=$CONFIG_TARGET \
     --build=$CONFIG_HOST )
@@ -600,6 +675,7 @@ extract $SOURCES_DIR/readline-8.1.tar.gz $BUILD_DIR
 ( cd $BUILD_DIR/readline-8.1/ && \
     CFLAGS="-Os" CPPFLAGS="" CXXFLAGS="-Os" LDFLAGS="" \
     $BUILD_DIR/readline-8.1/configure \
+	--prefix=/usr \
     --target=$CONFIG_TARGET \
     --host=$CONFIG_TARGET \
     --build=$CONFIG_HOST )
@@ -612,6 +688,7 @@ extract $SOURCES_DIR/autoconf-2.71.tar.xz $BUILD_DIR
 ( cd $BUILD_DIR/autoconf-2.71/ && \
     CFLAGS="-Os" CPPFLAGS="" CXXFLAGS="-Os" LDFLAGS="" \
     $BUILD_DIR/autoconf-2.71/configure \
+	--prefix=/usr \
     --target=$CONFIG_TARGET \
     --host=$CONFIG_TARGET \
     --build=$CONFIG_HOST )
@@ -624,6 +701,7 @@ extract $SOURCES_DIR/automake-1.16.3.tar.xz $BUILD_DIR
 ( cd $BUILD_DIR/automake-1.16.3/ && \
     CFLAGS="-Os" CPPFLAGS="" CXXFLAGS="-Os" LDFLAGS="" \
     $BUILD_DIR/automake-1.16.3/configure \
+	--prefix=/usr \
     --target=$CONFIG_TARGET \
     --host=$CONFIG_TARGET \
     --build=$CONFIG_HOST )
@@ -636,6 +714,7 @@ extract $SOURCES_DIR/bash-5.1.tar.gz $BUILD_DIR
 ( cd $BUILD_DIR/bash-5.1/ && \
     CFLAGS="-Os" CPPFLAGS="" CXXFLAGS="-Os" LDFLAGS="" \
     $BUILD_DIR/bash-5.1/configure \
+	--prefix=/usr \
     --target=$CONFIG_TARGET \
     --host=$CONFIG_TARGET \
     --build=$CONFIG_HOST )
@@ -659,6 +738,7 @@ extract $SOURCES_DIR/diffutils-3.7.tar.xz $BUILD_DIR
 ( cd $BUILD_DIR/diffutils-3.7/ && \
     CFLAGS="-Os" CPPFLAGS="" CXXFLAGS="-Os" LDFLAGS="" \
     $BUILD_DIR/diffutils-3.7/configure \
+	--prefix=/usr \
     --target=$CONFIG_TARGET \
     --host=$CONFIG_TARGET \
     --build=$CONFIG_HOST )
@@ -672,6 +752,7 @@ extract $SOURCES_DIR/file-5.40.tar.gz $BUILD_DIR
 ( cd $BUILD_DIR/file-5.40/ && \
     CFLAGS="-Os" CPPFLAGS="" CXXFLAGS="-Os" LDFLAGS="" \
     $BUILD_DIR/file-5.40/configure \
+	--prefix=/usr \
     --target=$CONFIG_TARGET \
     --host=$CONFIG_TARGET \
     --build=$CONFIG_HOST )
@@ -684,6 +765,7 @@ extract $SOURCES_DIR/gawk-5.1.0.tar.xz $BUILD_DIR
 ( cd $BUILD_DIR/gawk-5.1.0/ && \
     CFLAGS="-Os" CPPFLAGS="" CXXFLAGS="-Os" LDFLAGS="" \
     $BUILD_DIR/gawk-5.1.0/configure \
+	--prefix=/usr \
     --target=$CONFIG_TARGET \
     --host=$CONFIG_TARGET \
     --build=$CONFIG_HOST )
@@ -696,6 +778,7 @@ extract $SOURCES_DIR/findutils-4.8.0.tar.xz $BUILD_DIR
 ( cd $BUILD_DIR/findutils-4.8.0/ && \
     CFLAGS="-Os" CPPFLAGS="" CXXFLAGS="-Os" LDFLAGS="" \
     $BUILD_DIR/findutils-4.8.0/configure \
+	--prefix=/usr \
     --target=$CONFIG_TARGET \
     --host=$CONFIG_TARGET \
     --build=$CONFIG_HOST )
@@ -708,6 +791,7 @@ extract $SOURCES_DIR/gettext-0.21.tar.gz $BUILD_DIR
 ( cd $BUILD_DIR/gettext-0.21/ && \
     CFLAGS="-Os" CPPFLAGS="" CXXFLAGS="-Os" LDFLAGS="" \
     $BUILD_DIR/gettext-0.21/configure \
+	--prefix=/usr \
     --target=$CONFIG_TARGET \
     --host=$CONFIG_TARGET \
     --build=$CONFIG_HOST )
@@ -720,6 +804,7 @@ extract $SOURCES_DIR/gperf-3.1.tar.gz $BUILD_DIR
 ( cd $BUILD_DIR/gperf-3.1/ && \
     CFLAGS="-Os" CPPFLAGS="" CXXFLAGS="-Os" LDFLAGS="" \
     $BUILD_DIR/gperf-3.1/configure \
+	--prefix=/usr \
     --target=$CONFIG_TARGET \
     --host=$CONFIG_TARGET \
     --build=$CONFIG_HOST )
@@ -732,6 +817,7 @@ extract $SOURCES_DIR/grep-3.6.tar.xz $BUILD_DIR
 ( cd $BUILD_DIR/grep-3.6/ && \
     CFLAGS="-Os" CPPFLAGS="" CXXFLAGS="-Os" LDFLAGS="" \
     $BUILD_DIR/grep-3.6/configure \
+	--prefix=/usr \
     --target=$CONFIG_TARGET \
     --host=$CONFIG_TARGET \
     --build=$CONFIG_HOST )
@@ -743,9 +829,31 @@ step "$totalsteps] systemd"
 #Has to be compiled before util-linux when cross compiling
 extract $SOURCES_DIR/systemd-247.tar.gz $BUILD_DIR
 #The flags for defining target CPU have to be set on "make" commands instead of on the "configure" command.
+#The flags after ./configure are from Linux from Scratch
 ( cd $BUILD_DIR/systemd-247/ && \
     CFLAGS="-Os" CPPFLAGS="" CXXFLAGS="-Os" LDFLAGS="" \
-    $BUILD_DIR/systemd-247/configure)
+    $BUILD_DIR/systemd-247/configure \
+	-Dblkid=true \
+	-Dbuildtype=release \
+	-Ddefault-dnssec=no \
+	-Dfirstboot=false \
+	-Dinstall-tests=false \
+	-Dkmod-path=$SYSROOT_DIR/bin/kmod \
+	-Dldconfig=false \
+	-Dmount-path=$SYSROOT_DIR/bin/mount \
+	-Drootprefix= \
+	-Drootlibdir=$SYSROOT_DIR/lib \
+	-Dsplit-usr=true \
+	-Dsulogin-path=$SYSROOT_DIR/sbin/sulogin \
+	-Dsysusers=false \
+	-Dumount-path=$SYSROOT_DIR/bin/umount \
+	-Db_lto=false \
+	-Drpmmacrosdir=no \
+	-Dhomed=false \
+	-Duserdb=false \
+	-Dman=false \
+	-Dmode=release \
+	-Ddocdir=$SYSROOT_DIR/usr/share/doc/systemd-247 )
 make -j$PARALLEL_JOBS CC=$CONFIG_TARGET BUILD_CC=gcc LIBATTR=no PAM_CAP=no -C $BUILD_DIR/systemd-247
 make -j$PARALLEL_JOBS DESTDIR=$SYSROOT_DIR install -C $BUILD_DIR/systemd-247
 rm -rf $BUILD_DIR/systemd-247
@@ -754,7 +862,7 @@ rm -rf $BUILD_DIR/systemd-247
 #extract $SOURCES_DIR/groff-1.22.4.tar.gz $BUILD_DIR
 #The flag PAGE is set to A4 for international support.
 #( cd $BUILD_DIR/groff-1.22.4/ && \
-	CFLAGS="-Os" CPPFLAGS="" CXXFLAGS="-Os" LDFLAGS="" \
+#	CFLAGS="-Os" CPPFLAGS="" CXXFLAGS="-Os" LDFLAGS="" \
 #	PAGE="A4" \
 #	$BUILD_DIR/groff-1.22.4/configure \
 #	--target=$CONFIG_TARGET \
@@ -769,6 +877,7 @@ extract $SOURCES_DIR/gzip-1.10.tar.xz $BUILD_DIR
 ( cd $BUILD_DIR/gzip-1.10/ && \
     CFLAGS="-Os" CPPFLAGS="" CXXFLAGS="-Os" LDFLAGS="" \
     $BUILD_DIR/gzip-1.10/configure \
+	--prefix=/usr \
     --target=$CONFIG_TARGET \
     --host=$CONFIG_TARGET \
     --build=$CONFIG_HOST )
@@ -782,6 +891,7 @@ extract $SOURCES_DIR/iputils-20210202.tar.gz $BUILD_DIR
 ( cd $BUILD_DIR/iputils-20210202/ && \
     CFLAGS="-Os" CPPFLAGS="" CXXFLAGS="-Os" LDFLAGS="" \
     $BUILD_DIR/iputils-20210202/configure \
+	--prefix=/usr \
     --target=$CONFIG_TARGET \
     --host=$CONFIG_TARGET \
     --build=$CONFIG_HOST )
@@ -803,6 +913,7 @@ extract $SOURCES_DIR/kbd-2.4.0.tar.gz $BUILD_DIR
 	./autogen.sh && \
     CFLAGS="-Os" CPPFLAGS="" CXXFLAGS="-Os" LDFLAGS="" \
     $BUILD_DIR/kbd-2.4.0/configure \
+	--prefix=/usr \
     --target=$CONFIG_TARGET \
     --host=$CONFIG_TARGET \
     --build=$CONFIG_HOST \
@@ -811,29 +922,31 @@ make -j$PARALLEL_JOBS -C $BUILD_DIR/kbd-2.4.0
 make -j$PARALLEL_JOBS DESTDIR=$SYSROOT_DIR install -C $BUILD_DIR/kbd-2.4.0
 rm -rf $BUILD_DIR/kbd-2.4.0
 
-#step "$totalsteps] less-563"
-#extract $SOURCES_DIR/less-563.tar.gz $BUILD_DIR
-#The --with-editor flag sets the default editor and without defining it it will use vi as default
+step "$totalsteps] less-563"
+extract $SOURCES_DIR/less-563.tar.gz $BUILD_DIR
+#The --with-editor flag sets the default editor and without defining it, it will use vi as default
 #The --with-secure flag disable some less functions that can be a security risk
 #The --with-regex flag defines the regex lib less should use. The source of less includes the source of reqcomp where regcomp-local tells less to use the included regcomp.
-#( cd $BUILD_DIR/less-563/ && \
-#	CFLAGS="-Os" CPPFLAGS="" CXXFLAGS="-Os" LDFLAGS="" \
-#	$BUILD_DIR/less-563/configure \
-#	--target=$CONFIG_TARGET \
-#	--host=$CONFIG_TARGET \
-#	--build=$CONFIG_HOST \
-#	--with-editor=nano \
-#	--with-secure \
-#	--with-regex=regcomp-local )
-#make -j$PARALLEL_JOBS -C $BUILD_DIR/less-563
-#make -j$PARALLEL_JOBS DESTDIR=$SYSROOT_DIR install -C $BUILD_DIR/less-563
-#rm -rf $BUILD_DIR/less-563
+( cd $BUILD_DIR/less-563/ && \
+	CFLAGS="-Os" CPPFLAGS="" CXXFLAGS="-Os" LDFLAGS="" \
+	$BUILD_DIR/less-563/configure \
+	--prefix=/usr \
+	--target=$CONFIG_TARGET \
+	--host=$CONFIG_TARGET \
+	--build=$CONFIG_HOST \
+	--with-editor=nano \
+	--with-secure \
+	--with-regex=regcomp-local )
+make -j$PARALLEL_JOBS -C $BUILD_DIR/less-563
+make -j$PARALLEL_JOBS DESTDIR=$SYSROOT_DIR install -C $BUILD_DIR/less-563
+rm -rf $BUILD_DIR/less-563
 
 step "$totalsteps] libpipeline"
 extract $SOURCES_DIR/libpipeline-1.5.3.tar.gz $BUILD_DIR
 ( cd $BUILD_DIR/libpipeline-1.5.3/ && \
 	CFLAGS="-Os" CPPFLAGS="" CXXFLAGS="-Os" LDFLAGS="" \
 	$BUILD_DIR/libpipeline-1.5.3/configure \
+	--prefix=/usr \
 	--target=$CONFIG_TARGET \
 	--host=$CONFIG_TARGET \
 	--build=$CONFIG_HOST )
@@ -859,9 +972,10 @@ extract $SOURCES_DIR/make-4.3.tar.gz $BUILD_DIR
 ( cd $BUILD_DIR/make-4.3/ && \
 	CFLAGS="-Os" CPPFLAGS="" CXXFLAGS="-Os" LDFLAGS="" \
 	$BUILD_DIR/make-4.3/configure \
+	--prefix=/usr \
 	--target=$CONFIG_TARGET \
 	--host=$CONFIG_TARGET \
-	--build=$CONFIG_HOST )
+	--build=$CONFIG_HOST \)
 make -j$PARALLEL_JOBS -C $BUILD_DIR/make-4.3
 make -j$PARALLEL_JOBS DESTDIR=$SYSROOT_DIR install -C $BUILD_DIR/make-4.3
 rm -rf $BUILD_DIR/make-4.3
@@ -879,16 +993,18 @@ make -j$PARALLEL_JOBS DESTDIR=$SYSROOT_DIR install -C $BUILD_DIR/xz-5.2.5
 rm -rf $BUILD_DIR/xz-5.2.5
 
 step "$totalsteps] expat"
+#Has to be cross compiled before dbus as dbus can not be cross compiled without expat.
 extract $SOURCES_DIR/expat-2.3.0.tar.xz $BUILD_DIR
 ( cd $BUILD_DIR/expat-2.3.0/ && \
 	CFLAGS="-Os" CPPFLAGS="" CXXFLAGS="-Os" LDFLAGS="" \
 	$BUILD_DIR/expat-2.3.0/configure \
+	--prefix=/usr \
 	--target=$CONFIG_TARGET \
 	--host=$CONFIG_TARGET \
 	--build=$CONFIG_HOST )
 make -j$PARALLEL_JOBS -C $BUILD_DIR/expat-2.3.0
 make -j$PARALLEL_JOBS DESTDIR=$SYSROOT_DIR install -C $BUILD_DIR/expat-2.3.0
-rm -rf $BUILD_DIR/expat-2.3.0
+#rm -rf $BUILD_DIR/expat-2.3.0
 
 #step "$totalsteps] XML-Parser"
 #extract $SOURCES_DIR/XML-Parser-2.46.tar.gz $BUILD_DIR
@@ -922,18 +1038,37 @@ make -j$PARALLEL_JOBS -C $BUILD_DIR/patch-2.7.6
 make -j$PARALLEL_JOBS DESTDIR=$SYSROOT_DIR install -C $BUILD_DIR/patch-2.7.6
 rm -rf $BUILD_DIR/patch-2.7.6
 
-#step "$totalsteps] dbus"
-#extract $SOURCES_DIR/dbus-1.12.20.tar.gz $BUILD_DIR
-#( cd $BUILD_DIR/dbus-1.12.20/ && \
-#	CFLAGS="-Os" CPPFLAGS="" CXXFLAGS="-Os" LDFLAGS="" \
-#	$BUILD_DIR/dbus-1.12.20/configure \
-#	--target=$CONFIG_TARGET \
-#	--host=$CONFIG_TARGET \
-#	--build=$CONFIG_HOST \
-#	--with-systemdsystemunitdir=$SYSROOT_DIR/lib/systemd/system )
-#make -j$PARALLEL_JOBS -C $BUILD_DIR/dbus-1.12.20
-#make -j$PARALLEL_JOBS DESTDIR=$SYSROOT_DIR install -C $BUILD_DIR/dbus-1.12.20
-#rm -rf $BUILD_DIR/dbus-1.12.20
+step "$totalsteps] dbus"
+extract $SOURCES_DIR/dbus-1.12.20.tar.gz $BUILD_DIR
+( cd $BUILD_DIR/dbus-1.12.20/ && \
+	CFLAGS="-Os" CPPFLAGS="" CXXFLAGS="-Os" LDFLAGS="" CC="$CONFIG_TARGET-gcc -I$BUILD_DIR/expat-2.3.0/include -L$BUILD_DIR/expat-2.3.0/lib" \
+	$BUILD_DIR/dbus-1.12.20/configure \
+	--prefix=/usr \
+	--target=$CONFIG_TARGET \
+	--host=$CONFIG_TARGET \
+	--build=$CONFIG_HOST \
+	--sysconfdir=$SYSROOT_DIR/etc \
+	--localstatedir=$SYSROOT_DIR/var \
+	--disable-static \
+	--disable-doxygen-docs \
+	--disable-xml-docs \
+	--docdir=$SYSROOT_DIR/usr/share/doc/dbus-1.12.20 \
+	--with-console-auth-dir=$SYSROOT_DIR/run/console \
+	--with-system-pid-file=$SYSROOT_DIR/run/dbus/pid \
+	--with-system-socket=$SYSROOT_DIR/run/dbus/system_bus_socket \
+	--with-systemdsystemunitdir=$SYSROOT_DIR/lib/systemd/system \
+	--with-x=no )
+make -j$PARALLEL_JOBS -C $BUILD_DIR/dbus-1.12.20
+make -j$PARALLEL_JOBS DESTDIR=$SYSROOT_DIR install -C $BUILD_DIR/dbus-1.12.20
+#The make install does not places libs correctly so the two next commands fixes this
+#mv -v $BUILD_DIR/dbus-1.12.20/dbus/libdbus-1.so.* $SYSROOT_DIR/lib
+mv -v $BUILD_DIR/dbus-1.12.20/dbus/.libs/libdbus-1.so $SYSROOT_DIR/usr/lib
+mv -v $BUILD_DIR/dbus-1.12.20/dbus/.libs/libdbus-1.so.* $SYSROOT_DIR/lib
+ln -sfv $SYSROOT_DIR/lib/$(readlink $SYSROOT_DIR/usr/lib/libdbus-1.so) $SYSROOT_DIR/usr/lib/libdbus-1.so
+#Create a symlink so that D-Bus and systemd can use the same machine-id file
+ln -sfv $SYSROOT_DIR/etc/machine-id $SYSROOT_DIR/var/lib/dbus
+rm -rf $BUILD_DIR/expat-2.3.0
+rm -rf $BUILD_DIR/dbus-1.12.20
 
 #step "$totalsteps] psmisc"
 #extract $SOURCES_DIR/psmisc-v22.21.tar.gz $BUILD_DIR
@@ -1018,24 +1153,48 @@ extract $SOURCES_DIR/nano-5.6.1.tar.xz $BUILD_DIR
 ( cd $BUILD_DIR/nano-5.6.1/ && \
 	CFLAGS="-Os" CPPFLAGS="" CXXFLAGS="-Os" LDFLAGS="" \
 	$BUILD_DIR/nano-5.6.1/configure \
+	--prefix=$SYSROOT_DIR/usr \
+	--sysconfdir=$SYSROOT_DIR/etc \
 	--target=$CONFIG_TARGET \
 	--host=$CONFIG_TARGET \
-	--build=$CONFIG_HOST )
+	--build=$CONFIG_HOST \
+	--enable-utf8 \
+	--docdir=/usr/share/doc/nano-5.6.1 )
 make -j$PARALLEL_JOBS -C $BUILD_DIR/nano-5.6.1
 make -j$PARALLEL_JOBS DESTDIR=$SYSROOT_DIR install -C $BUILD_DIR/nano-5.6.1
 rm -rf $BUILD_DIR/nano-5.6.1
 
 step "$totalsteps] util-linux"
+#aarch64-linux-musl needs to be installed
 extract $SOURCES_DIR/util-linux-2.36.2.tar.xz $BUILD_DIR
 ( cd $BUILD_DIR/util-linux-2.36.2/ && \
 	./autogen.sh && \
-    CFLAGS="-Os" CPPFLAGS="" CXXFLAGS="-Os" LDFLAGS="" \
+    CFLAGS="-Os" CPPFLAGS="" CXXFLAGS="-Os" LDFLAGS="-L$SYSROOT_DIR/usr/lib/ --static" \
     $BUILD_DIR/util-linux-2.36.2/configure \
+	ADJTIME_PATH=/var/lib/hwclock/adjtime \
+	--docdir=$SYSROOT_DIR/usr/share/doc/util-linux-2.36.2 \
     --target=$CONFIG_TARGET \
     --host=$CONFIG_TARGET \
     --build=$CONFIG_HOST \
+	--disable-chfn-chsh \
+	--disable-login \
+	--disable-nologin \
+	--disable-su \
+	--disable-setpriv \
+	--disable-runuser \
+	--disable-pylibmount \
 	--disable-stripping \
-	--without-python )
-make -j$PARALLEL_JOBS -C $BUILD_DIR/util-linux-2.36.2
+	--without-python \
+	runstatedir=$SYSROOT_DIR/run )
+#The flag --static is need to get make install work when cross compiling util-linux
+make -j$PARALLEL_JOBS LDFLAGS="-L$SYSROOT_DIR/usr/lib/ --static" -C $BUILD_DIR/util-linux-2.36.2
 make -j$PARALLEL_JOBS DESTDIR=$SYSROOT_DIR install -C $BUILD_DIR/util-linux-2.36.2
+#make -j$PARALLEL_JOBS DESTDIR=$SYSROOT_DIR install-strip -C $BUILD_DIR/util-linux-2.36.2
 rm -rf $BUILD_DIR/util-linux-2.36.2
+
+step "$totalsteps] Create and mount SD card image"
+#Mounts the partitions on SD card image
+#sudo umount $ROOTFS_DIR/boot
+#sudo umount $ROOTFS_DIR
+#Unmounts all partitions on image
+#sudo kpartx -d $IMAGES_DIR/image.img
